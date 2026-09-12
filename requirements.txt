@@ -1,1 +1,6 @@
-
+gradio
+chromadb
+sentence-transformers
+pytesseract
+pdf2image
+huggingface_hub
