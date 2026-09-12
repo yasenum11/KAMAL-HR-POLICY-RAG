@@ -1,1 +1,292 @@
+import gradio as gr
+import chromadb
+import pytesseract
+from pdf2image import convert_from_path
+from sentence_transformers import SentenceTransformer
+import os
 
+# ============================================================
+# HR POLICY ASSISTANT
+# ============================================================
+
+print("Loading embedding model...")
+
+embedding_model = SentenceTransformer(
+    "all-MiniLM-L6-v2"
+)
+
+client = chromadb.Client()
+
+try:
+    client.delete_collection("hr_policies")
+except Exception:
+    pass
+
+collection = client.create_collection(
+    "hr_policies"
+)
+
+print("Application ready.")
+
+
+# ============================================================
+# PDF PROCESSING
+# ============================================================
+
+def process_pdf(pdf_path):
+
+    global collection
+
+    if not pdf_path:
+        return "❌ Please upload a PDF."
+
+    try:
+
+        print("Processing:", pdf_path)
+
+        images = convert_from_path(
+            pdf_path,
+            dpi=150
+        )
+
+        all_text = []
+
+        for i, image in enumerate(images):
+
+            print(
+                f"Reading page {i + 1}/{len(images)}"
+            )
+
+            text = pytesseract.image_to_string(
+                image
+            )
+
+            all_text.append(text)
+
+        full_text = "\n".join(all_text)
+
+        if len(full_text.strip()) < 100:
+
+            return (
+                "❌ Could not extract readable "
+                "text from the PDF."
+            )
+
+        # Create chunks
+        chunks = []
+
+        for i in range(
+            0,
+            len(full_text),
+            800
+        ):
+
+            chunk = full_text[
+                i:i + 1000
+            ]
+
+            if chunk.strip():
+                chunks.append(chunk)
+
+        print(
+            "Chunks created:",
+            len(chunks)
+        )
+
+        # Create embeddings
+        embeddings = embedding_model.encode(
+            chunks
+        ).tolist()
+
+        # Reset database
+        try:
+            client.delete_collection(
+                "hr_policies"
+            )
+        except Exception:
+            pass
+
+        collection = client.create_collection(
+            "hr_policies"
+        )
+
+        collection.add(
+            documents=chunks,
+            embeddings=embeddings,
+            ids=[
+                str(i)
+                for i in range(len(chunks))
+            ]
+        )
+
+        return (
+            f"✅ PDF READY\n\n"
+            f"Pages: {len(images)}\n"
+            f"Chunks: {len(chunks)}\n\n"
+            f"You can now ask your question."
+        )
+
+    except Exception as e:
+
+        return (
+            f"❌ PDF ERROR\n\n"
+            f"{type(e).__name__}: {str(e)}"
+        )
+
+
+# ============================================================
+# SEARCH POLICY
+# ============================================================
+
+def search_policy(question):
+
+    if not question or not question.strip():
+
+        return "❌ Please type a question."
+
+    try:
+
+        if collection.count() == 0:
+
+            return (
+                "❌ Please upload your HR Policy PDF "
+                "first."
+            )
+
+        # Convert question to embedding
+        question_embedding = (
+            embedding_model.encode(
+                [question]
+            ).tolist()
+        )
+
+        # Search
+        results = collection.query(
+            query_embeddings=question_embedding,
+            n_results=min(
+                5,
+                collection.count()
+            )
+        )
+
+        documents = results.get(
+            "documents",
+            [[]]
+        )[0]
+
+        if not documents:
+
+            return (
+                "❌ No matching information "
+                "found in the HR policy."
+            )
+
+        # Display relevant policy text
+        answer = (
+            "### 🔎 Relevant HR Policy Information\n\n"
+        )
+
+        for i, document in enumerate(
+            documents,
+            start=1
+        ):
+
+            answer += (
+                f"**Policy Section {i}**\n\n"
+                f"{document.strip()}\n\n"
+                f"---\n\n"
+            )
+
+        return answer
+
+    except Exception as e:
+
+        return (
+            f"❌ SEARCH ERROR\n\n"
+            f"{type(e).__name__}: {str(e)}"
+        )
+
+
+# ============================================================
+# GRADIO INTERFACE
+# ============================================================
+
+with gr.Blocks(
+    title="KAMAL HR POLICY ASSISTANT"
+) as app:
+
+    gr.Markdown(
+        """
+# 🏢 KAMAL HR POLICY ASSISTANT
+
+### Search your HR Policy PDF
+"""
+    )
+
+    gr.Markdown(
+        """
+## Step 1 — Upload your HR Policy
+"""
+    )
+
+    pdf = gr.File(
+        label="📄 Upload HR Policy PDF",
+        file_types=[".pdf"],
+        type="filepath"
+    )
+
+    status = gr.Textbox(
+        label="📋 PDF Status",
+        lines=5,
+        interactive=False
+    )
+
+    pdf.change(
+        fn=process_pdf,
+        inputs=pdf,
+        outputs=status
+    )
+
+    gr.Markdown(
+        """
+## Step 2 — Ask your HR question
+"""
+    )
+
+    question = gr.Textbox(
+        label="💬 Your Question",
+        placeholder=(
+            "Example: What is the purpose of "
+            "the Code of Conduct?"
+        ),
+        lines=3
+    )
+
+    search_button = gr.Button(
+        "🔎 SEARCH HR POLICY",
+        variant="primary",
+        size="lg"
+    )
+
+    answer = gr.Markdown(
+        "Your answer will appear here."
+    )
+
+    search_button.click(
+        fn=search_policy,
+        inputs=question,
+        outputs=answer
+    )
+
+    question.submit(
+        fn=search_policy,
+        inputs=question,
+        outputs=answer
+    )
+
+
+# ============================================================
+# START
+# ============================================================
+
+app.launch()
